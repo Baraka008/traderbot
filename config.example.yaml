@@ -1,0 +1,91 @@
+# ---------------------------------------------------------------------------
+# Scalper bot configuration. Copy to config.yaml and fill in your credentials
+# through environment variables (DERIV_TOKEN, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER).
+# ---------------------------------------------------------------------------
+broker: paper            # paper | deriv | mt5   (paper = real prices, simulated fills)
+symbol: R_75             # Deriv: R_10 R_25 R_50 R_75 R_100 1HZ75V frxEURUSD ...
+                         # MT5 (HFM): EURUSD GBPUSD XAUUSD ...  MT5 (Deriv): "Volatility 75 Index"
+timeframe_sec: 60        # 60 = M1 scalping; MT5 supports 60,120,180,300,600,900,1800,3600
+poll_interval_sec: 1.0
+candle_count: 300
+close_positions_on_exit: false
+journal_csv: trades.csv
+history_dir: data                # candles + indicator snapshots are saved here (fetch/run/backtest share it)
+log_indicators: true
+max_quote_age_sec: 30            # block entries when the price feed freezes (0 = off)
+max_consecutive_errors: 5        # reconnect after this many broker errors in a row
+log_level: INFO
+
+deriv:
+  token: ${DERIV_TOKEN}            # https://app.deriv.com/account/api-token  (scopes: Read + Trade)
+  app_id: ${DERIV_APP_ID:-1089}    # register your own at https://api.deriv.com
+  endpoint: wss://ws.derivws.com/websockets/v3
+  multiplier: 100                  # must be one offered for the symbol (see `symbols --check-multipliers`)
+  min_stake: 1.0
+  max_stake: 1000.0
+  stake_step: 0.01
+
+mt5:                               # HFM: server e.g. HFMarketsGlobal-Demo / HFMarketsGlobal-Live2
+  login: ${MT5_LOGIN}              # Deriv MT5: server e.g. Deriv-Demo / Deriv-Server
+  password: ${MT5_PASSWORD}
+  server: ${MT5_SERVER}
+  path: ""                         # optional full path to terminal64.exe
+  magic: 777123
+  deviation_points: 20
+  comment: scalper
+
+paper:
+  data_source: deriv               # deriv | mt5 - where paper mode gets its prices
+  balance: 10000
+  slippage_points: 1
+  commission_per_unit: 0           # per lot (cfd) / per 1.0 stake (multiplier)
+  # instrument: multiplier         # defaults: multiplier for deriv data, cfd for mt5 data
+  # tick_value: 1.0                # cfd mode: account currency per point per 1.0 lot
+
+strategy:
+  entry_mode: cross                # cross | momentum
+  ema_fast: 9
+  ema_slow: 21
+  ema_trend: 50
+  rsi_period: 14
+  rsi_buy_min: 50
+  rsi_buy_max: 75
+  rsi_sell_min: 25
+  rsi_sell_max: 50
+  atr_period: 14
+  sl_atr_mult: 1.0
+  tp_atr_mult: 1.5
+  min_atr_points: 0                # volatility floor, in points (0 = off)
+  max_atr_points: 0                # volatility ceiling, in points (0 = off) - skips news spikes
+  trade_hours: ""                  # e.g. "07:00-20:00" (Deriv: UTC, MT5: server time); "" = 24h
+  trade_days: ""                   # e.g. "mon,tue,wed,thu,fri"; "" = every day (synthetics trade 24/7)
+  htf_multiplier: 0                # e.g. 5 = only trade in the direction of the M5 EMA trend (0 = off)
+  htf_ema: 50
+  max_spread_atr_ratio: 0.25       # skip entries when spread > 25% of ATR
+  max_spread_points: 0             # absolute spread cap in points (0 = off)
+  max_hold_bars: 15                # time stop
+  breakeven_atr_mult: 0.8
+  breakeven_buffer_points: 2
+  trail_activate_atr_mult: 1.0
+  trail_atr_mult: 0.6
+  exit_on_opposite_cross: true
+
+risk:
+  risk_per_trade_pct: 0.5          # % of balance lost if the stop is hit
+  fixed_volume: 0                  # > 0 forces a fixed lot size / stake
+  max_risk_overshoot: 2.0
+  max_daily_loss_pct: 3.0
+  max_daily_profit_pct: 0          # 0 = no daily profit cap
+  max_trades_per_day: 30
+  max_open_positions: 1
+  max_consecutive_losses: 3
+  cooldown_after_loss_sec: 120
+  consecutive_loss_pause_sec: 1800
+
+backtest:
+  instrument: multiplier           # multiplier (Deriv stake-based) | cfd (lots, MT5)
+  balance: 10000
+  spread_points: 0                 # Deriv synthetics have no spread; forex/HFM try 10-20
+  slippage_points: 1
+  commission_per_unit: 0.0
+  tick_value: 1.0                  # cfd only
