@@ -37,6 +37,7 @@ class PaperBroker(Broker):
         self._ids = itertools.count(1)
         self._info: Dict[str, SymbolInfo] = {}
         self._last_quote: Dict[str, Quote] = {}
+        self._per_point: Dict[str, float] = {}     # cfd: account currency per point per 1.0 lot, per symbol
 
     async def connect(self) -> None:
         await self.data.connect()
@@ -73,16 +74,28 @@ class PaperBroker(Broker):
     def _pnl(self, pos: Position, exit_price: float, info: SymbolInfo) -> float:
         diff = (exit_price - pos.entry_price) if pos.side is Side.BUY else (pos.entry_price - exit_price)
         if self.instrument == "multiplier":
-            gross = pos.volume * self.multiplier * diff / pos.entry_price
+            mult = self.data.mult(pos.symbol) if hasattr(self.data, "mult") else self.multiplier
+            gross = pos.volume * mult * diff / pos.entry_price
         else:
-            gross = diff / info.point * self.tick_value * pos.volume
+            gross = diff / info.point * self._per_point.get(pos.symbol, self.tick_value) * pos.volume
         return gross - self.commission_per_unit * pos.volume
 
     async def loss_per_unit(self, symbol: str, side: Side, entry: float, stop_loss: float) -> float:
         if self.instrument == "multiplier":
-            return self.multiplier * abs(entry - stop_loss) / entry if entry > 0 else 0.0
+            mult = self.data.mult(symbol) if hasattr(self.data, "mult") else self.multiplier
+            return mult * abs(entry - stop_loss) / entry if entry > 0 else 0.0
         info = self._info.get(symbol) or await self.symbol_info(symbol)
-        return abs(entry - stop_loss) / info.point * self.tick_value
+        dist_points = abs(entry - stop_loss) / info.point
+        if self.data.name == "mt5" and dist_points > 0:
+            # learn the real per-point value from the terminal so paper P/L matches live P/L
+            try:
+                lpu = await self.data.loss_per_unit(symbol, side, entry, stop_loss)
+                if lpu > 0:
+                    self._per_point[symbol] = lpu / dist_points
+                    return lpu
+            except BrokerError:
+                pass
+        return dist_points * self._per_point.get(symbol, self.tick_value)
 
     def _close(self, pos: Position, exit_price: float, reason: str, when: float) -> ClosedTrade:
         info = self._info[pos.symbol]

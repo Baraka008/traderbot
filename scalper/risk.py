@@ -18,7 +18,8 @@ class RiskConfig:
     max_daily_loss_pct: float = 3.0      # stop trading for the day after this drawdown
     max_daily_profit_pct: float = 0.0    # 0 = no profit cap
     max_trades_per_day: int = 30
-    max_open_positions: int = 1
+    max_open_positions: int = 1          # across ALL symbols (portfolio cap)
+    max_positions_per_symbol: int = 1
     max_consecutive_losses: int = 3      # pause for cooldown after this many losses in a row
     cooldown_after_loss_sec: int = 120   # wait after any loss before re-entering
     consecutive_loss_pause_sec: int = 1800
@@ -28,6 +29,8 @@ class RiskConfig:
             raise ValueError("risk_per_trade_pct must be > 0 unless fixed_volume is set")
         if self.max_open_positions < 1:
             raise ValueError("max_open_positions must be >= 1")
+        if self.max_positions_per_symbol < 1:
+            raise ValueError("max_positions_per_symbol must be >= 1")
 
 
 @dataclass
@@ -80,11 +83,14 @@ class RiskManager:
                 s.consecutive_losses = 0
 
     # ------------------------------------------------------------------ gates
-    def can_trade(self, balance: float, open_positions: int) -> Tuple[bool, str]:
+    def can_trade(self, balance: float, open_positions: int, symbol_positions: Optional[int] = None) -> Tuple[bool, str]:
+        """``open_positions`` is the portfolio-wide count, ``symbol_positions`` the count on this symbol."""
         self._roll_day(balance)
         s, c, now = self.stats, self.cfg, self.clock()
         if open_positions >= c.max_open_positions:
             return False, "max_open_positions"
+        if symbol_positions is not None and symbol_positions >= c.max_positions_per_symbol:
+            return False, "max_positions_per_symbol"
         if c.max_trades_per_day > 0 and s.trades_opened >= c.max_trades_per_day:
             return False, "max_trades_per_day"
         base = s.start_balance if s.start_balance > 0 else balance

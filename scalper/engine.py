@@ -8,7 +8,7 @@ import os
 import signal
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from .brokers.base import Broker, BrokerError, ConnectionLost
 from .history import HistoryStore, validate_candles
@@ -55,13 +55,18 @@ class Journal:
 
 
 class Engine:
-    def __init__(self, broker: Broker, strategy: ScalpStrategy, risk: RiskManager, cfg: EngineConfig):
+    """Trades one symbol. Several engines can share a broker and a RiskManager (see MultiEngine)."""
+
+    def __init__(self, broker: Broker, strategy: ScalpStrategy, risk: RiskManager, cfg: EngineConfig,
+                 stop_event: Optional[asyncio.Event] = None, open_count_fn: Optional[Callable[[], int]] = None):
         self.broker = broker
         self.strategy = strategy
         self.risk = risk
         self.cfg = cfg
+        self.tag = f"[{cfg.symbol}]"
         self.journal = Journal(cfg.journal_csv)
-        self.stop_event = asyncio.Event()
+        self.stop_event = stop_event or asyncio.Event()
+        self.open_count_fn = open_count_fn          # portfolio-wide open position count (multi-symbol)
         self.tracked: Dict[str, Position] = {}
         self._pending_close: Dict[str, int] = {}
         self._last_block_reason = ""
@@ -127,15 +132,16 @@ class Engine:
         log.info("stopped. day pnl=%.2f trades=%d wins=%d losses=%d", s.realized_pnl, s.trades_opened, s.wins, s.losses)
 
     # ------------------------------------------------------------------ main loop
-    async def _session(self) -> None:
+    async def _session(self, connect: bool = True) -> None:
         cfg = self.cfg
-        await self.broker.connect()
+        if connect:
+            await self.broker.connect()
         info = await self.broker.symbol_info(cfg.symbol)
         balance = await self.broker.balance()
         if self.risk.stats.day == "":
             self.risk.start_day(balance)
         self.tracked = {p.id: p for p in await self.broker.open_positions(cfg.symbol)}
-        log.info("engine started: %s (%s) tf=%ds balance=%.2f open_positions=%d broker=%s", info.name, info.description,
+        log.info("%s engine started: %s tf=%ds balance=%.2f open_positions=%d broker=%s", self.tag, info.description,
                  cfg.timeframe_sec, balance, len(self.tracked), self.broker.name)
 
         last_bar: Optional[int] = None
@@ -152,7 +158,7 @@ class Engine:
                     raw = await self.broker.candles(cfg.symbol, tf, count)
                     candles, issues = validate_candles([c for c in raw if c.time < bar_id * tf], tf)
                     for issue in issues:
-                        log.warning("candle data: %s", issue)
+                        log.warning("%s candle data: %s", self.tag, issue)
                     new_bar = last_bar is not None
                     last_bar = bar_id
                     if candles:
@@ -168,7 +174,7 @@ class Engine:
                 raise
             except BrokerError as e:
                 self._errors_in_row += 1
-                log.error("broker error (%d in a row): %s", self._errors_in_row, e)
+                log.error("%s broker error (%d in a row): %s", self.tag, self._errors_in_row, e)
                 if self._errors_in_row >= cfg.max_consecutive_errors:
                     raise ConnectionLost(f"too many consecutive broker errors: {e}")
                 await asyncio.sleep(min(5.0, cfg.poll_interval_sec * 2 + 1))
@@ -197,12 +203,12 @@ class Engine:
             self._last_quote_time = quote.time
             self._last_quote_seen_at = now
             if self._stale_logged:
-                log.info("quote feed resumed")
+                log.info("%s quote feed resumed", self.tag)
                 self._stale_logged = False
             return False
         if self._last_quote_seen_at and now - self._last_quote_seen_at > self.cfg.max_quote_age_sec:
             if not self._stale_logged:
-                log.warning("quote feed stale for %.0fs; entries blocked", now - self._last_quote_seen_at)
+                log.warning("%s quote feed stale for %.0fs; entries blocked", self.tag, now - self._last_quote_seen_at)
                 self._stale_logged = True
             return True
         return False
@@ -218,7 +224,7 @@ class Engine:
                 tries = self._pending_close.get(pid, 0) + 1
                 self._pending_close[pid] = tries
                 if tries > 30:
-                    log.warning("position %s vanished without a trade record; dropping it", pid)
+                    log.warning("%s position %s vanished without a trade record; dropping it", self.tag, pid)
                     self.tracked.pop(pid, None)
                     self._pending_close.pop(pid, None)
                 continue
@@ -260,15 +266,18 @@ class Engine:
 
     def _blocked(self, why: str) -> None:
         if why != self._last_block_reason:
-            log.info("entries blocked: %s", why)
+            log.info("%s entries blocked: %s", self.tag, why)
             self._last_block_reason = why
+
+    def total_open(self) -> int:
+        return self.open_count_fn() if self.open_count_fn is not None else len(self.tracked)
 
     async def _maybe_enter(self, candles, quote, info) -> None:
         if not await self.broker.market_open(self.cfg.symbol):
             self._blocked("market_closed")
             return
         balance = await self.broker.balance()
-        ok, why = self.risk.can_trade(balance, len(self.tracked))
+        ok, why = self.risk.can_trade(balance, self.total_open(), len(self.tracked))
         if not ok:
             self._blocked(why)
             return
@@ -284,15 +293,106 @@ class Engine:
         lpu = await self.broker.loss_per_unit(self.cfg.symbol, sig.side, sig.entry, sig.stop_loss)
         volume = self.risk.volume_for(balance, lpu, info)
         if volume <= 0:
-            log.info("signal %s skipped: computed volume is 0 (loss_per_unit=%.4f balance=%.2f)", sig.reason, lpu, balance)
+            log.info("%s signal %s skipped: computed volume is 0 (loss_per_unit=%.4f balance=%.2f)", self.tag, sig.reason, lpu, balance)
             return
         try:
             pos = await self.broker.open_market(self.cfg.symbol, sig.side, volume, sig.stop_loss, sig.take_profit,
                                                 comment=sig.reason[:31])
         except BrokerError as e:
-            log.error("open %s failed: %s", sig.side.value, e)
+            log.error("%s open %s failed: %s", self.tag, sig.side.value, e)
             return
         self.risk.on_open()
         self.tracked[pos.id] = pos
         log.info("OPEN %s %s vol=%s entry=%.5f sl=%.5f tp=%.5f atr=%.5f (%s)", pos.side.value, pos.symbol, volume,
                  pos.entry_price, pos.stop_loss, pos.take_profit, sig.atr, sig.reason)
+
+
+class MultiEngine:
+    """Runs one Engine per symbol concurrently over a single broker connection and a shared RiskManager.
+
+    The RiskManager's daily loss cap, trade count, cooldowns and ``max_open_positions`` therefore apply to the
+    whole portfolio; ``max_positions_per_symbol`` limits each chart.
+    """
+
+    def __init__(self, broker: Broker, engines: List[Engine], cfg: EngineConfig):
+        if not engines:
+            raise ValueError("MultiEngine needs at least one engine")
+        self.broker = broker
+        self.engines = engines
+        self.cfg = cfg
+        self.stop_event = asyncio.Event()
+        for e in engines:
+            e.stop_event = self.stop_event
+            e.open_count_fn = self.open_count
+
+    def open_count(self) -> int:
+        return sum(len(e.tracked) for e in self.engines)
+
+    def request_stop(self) -> None:
+        log.info("stop requested")
+        self.stop_event.set()
+
+    @property
+    def closed_trades(self):
+        return sorted((t for e in self.engines for t in e.closed_trades), key=lambda t: t.close_time)
+
+    async def run(self) -> None:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, self.request_stop)
+            except (NotImplementedError, RuntimeError):
+                signal.signal(sig, lambda *_: self.request_stop())
+        backoff = 1.0
+        while not self.stop_event.is_set():
+            tasks: List[asyncio.Task] = []
+            try:
+                await self.broker.connect()
+                log.info("portfolio engine: %d symbols (%s)", len(self.engines), ", ".join(e.cfg.symbol for e in self.engines))
+                tasks = [asyncio.create_task(e._session(connect=False), name=f"engine-{e.cfg.symbol}") for e in self.engines]
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+                for t in done:
+                    if t.exception() is not None:
+                        raise t.exception()
+                if pending:
+                    await asyncio.wait(pending)       # remaining sessions finish (stop or max_iterations)
+                    for t in pending:
+                        if t.exception() is not None:
+                            raise t.exception()
+                break
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                log.error("portfolio session error: %s (reconnecting in %.0fs)", e, backoff)
+                try:
+                    await self.broker.close()
+                except Exception:
+                    pass
+                if self.cfg.max_iterations:
+                    raise
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, self.cfg.reconnect_backoff_max_sec)
+        await self._shutdown()
+
+    async def _shutdown(self) -> None:
+        try:
+            if self.cfg.close_positions_on_exit:
+                for e in self.engines:
+                    for pos in list(e.tracked.values()):
+                        try:
+                            e._on_closed(await self.broker.close_position(pos, "shutdown"))
+                            e.tracked.pop(pos.id, None)
+                        except Exception as ex:
+                            log.error("could not close %s on exit: %s", pos.id, ex)
+        finally:
+            try:
+                await self.broker.close()
+            except Exception:
+                pass
+        s = self.engines[0].risk.stats
+        log.info("stopped. portfolio day pnl=%.2f trades=%d wins=%d losses=%d", s.realized_pnl, s.trades_opened, s.wins, s.losses)

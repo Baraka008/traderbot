@@ -44,7 +44,7 @@ pip install -e ".[dev]"
 Verify:
 ```bash
 scalper --version
-pytest -q          # 42 tests should pass
+pytest -q          # 47 tests should pass
 ```
 
 ## 4. Configure
@@ -75,7 +75,8 @@ Edit `config.yaml`:
 | Setting | Deriv API | HFM / Deriv MT5 |
 |---|---|---|
 | `broker` | `deriv` (or `paper` with `paper.data_source: deriv`) | `mt5` (or `paper` with `paper.data_source: mt5`) |
-| `symbol` | `R_75`, `R_100`, `1HZ75V`, `frxEURUSD` … | `EURUSD`, `XAUUSD`, `Volatility 75 Index` … exactly as shown in Market Watch |
+| `symbols` | `R_75`, `R_100`, `1HZ75V`, `frxEURUSD` … | `EURUSD`, `XAUUSD`, `Volatility 75 Index` … exactly as shown in Market Watch |
+| `risk.max_open_positions` | how many charts may hold a position at the same time (worst case = this × `risk_per_trade_pct`) | same |
 | `deriv.multiplier` | one of the values from `scalper symbols --check-multipliers` | – |
 | `backtest.instrument` | `multiplier` | `cfd` (+ `tick_value` of the symbol) |
 | `strategy.trade_hours` | UTC | MT5 **server** time |
@@ -124,6 +125,8 @@ Stop with `Ctrl-C`. Logs go to the console (`--log-file bot.log` to keep them), 
 2. *Tools → MetaQuotes Language Editor* → open the file → **Compile** (no errors expected).
 3. Back in MT5: *View → Navigator → Expert Advisors → ScalperEA* → drag onto an **M1** chart.
 4. Tick *Allow Algo Trading* in the dialog and on the toolbar. Inputs mirror `config.yaml`.
+   For several charts, drag the EA onto each chart with the same magic number; `InpPortfolioLimits` and
+   `InpMaxTotalPositions` then apply account-wide.
 5. Test in *View → Strategy Tester* (model: *Every tick based on real ticks*) before a live account.
 
 ## 9. Run it unattended (optional)

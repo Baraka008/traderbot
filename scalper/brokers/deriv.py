@@ -34,13 +34,15 @@ class DerivBroker(Broker):
     def __init__(self, token: str, app_id: int = 1089,
                  endpoint: str = "wss://ws.derivws.com/websockets/v3",
                  multiplier: int = 100, min_stake: float = 1.0, max_stake: float = 1000.0,
-                 stake_step: float = 0.01, request_timeout: float = 20.0):
+                 stake_step: float = 0.01, request_timeout: float = 20.0,
+                 symbol_multipliers: Optional[Dict[str, int]] = None):
         if not token:
             raise BrokerError("Deriv API token is required (set DERIV_TOKEN)")
         self.token = token
         self.app_id = int(app_id)
         self.endpoint = endpoint
         self.multiplier = int(multiplier)
+        self.symbol_multipliers = {k: int(v) for k, v in (symbol_multipliers or {}).items()}
         self.min_stake = float(min_stake)
         self.max_stake = float(max_stake)
         self.stake_step = float(stake_step)
@@ -62,6 +64,10 @@ class DerivBroker(Broker):
         self._symbol_cache: Dict[str, SymbolInfo] = {}
         self._active_symbols: Dict[str, Dict[str, Any]] = {}
         self._closed = False
+
+    def mult(self, symbol: str) -> int:
+        """Multiplier used for a symbol (per-symbol override, else the default)."""
+        return self.symbol_multipliers.get(symbol, self.multiplier)
 
     # ------------------------------------------------------------------ transport
     async def _open_ws(self):
@@ -260,8 +266,8 @@ class DerivBroker(Broker):
         mults = await self.multiplier_range(symbol)
         if not mults:
             raise BrokerError(f"Deriv symbol '{symbol}' does not offer multiplier contracts")
-        if self.multiplier not in mults:
-            raise BrokerError(f"multiplier {self.multiplier} not available for {symbol}; choose one of {mults}")
+        if self.mult(symbol) not in mults:
+            raise BrokerError(f"multiplier {self.mult(symbol)} not available for {symbol}; choose one of {mults}")
         info = SymbolInfo(name=symbol, point=pip, digits=digits, min_volume=self.min_stake,
                           max_volume=self.max_stake, volume_step=self.stake_step,
                           stops_level_points=0, description=meta.get("display_name", symbol))
@@ -297,7 +303,7 @@ class DerivBroker(Broker):
         side = Side.BUY if poc.get("contract_type") == "MULTUP" else Side.SELL
         stake = float(poc.get("buy_price") or 0.0)
         entry = float(poc.get("entry_spot") or poc.get("current_spot") or 0.0)
-        mult = float(poc.get("multiplier") or self.multiplier)
+        mult = float(poc.get("multiplier") or self.mult(poc.get("underlying", "")))
         lo = poc.get("limit_order") or {}
         sl = self._level(lo.get("stop_loss"), side, entry, stake, mult, is_sl=True)
         tp = self._level(lo.get("take_profit"), side, entry, stake, mult, is_sl=False)
@@ -327,11 +333,11 @@ class DerivBroker(Broker):
             return entry - dist if is_sl else entry + dist
         return entry + dist if is_sl else entry - dist
 
-    def _amount(self, stake: float, entry: float, level: float) -> float:
+    def _amount(self, symbol: str, stake: float, entry: float, level: float) -> float:
         """Currency P/L for a multiplier contract when spot moves from entry to level."""
         if entry <= 0 or level <= 0:
             return 0.0
-        return round(stake * self.multiplier * abs(level - entry) / entry, 2)
+        return round(stake * self.mult(symbol) * abs(level - entry) / entry, 2)
 
     async def open_positions(self, symbol: str) -> List[Position]:
         out = []
@@ -372,7 +378,7 @@ class DerivBroker(Broker):
     async def loss_per_unit(self, symbol: str, side: Side, entry: float, stop_loss: float) -> float:
         if entry <= 0:
             return 0.0
-        return self.multiplier * abs(entry - stop_loss) / entry
+        return self.mult(symbol) * abs(entry - stop_loss) / entry
 
     async def open_market(self, symbol: str, side: Side, volume: float, stop_loss: float,
                           take_profit: float, comment: str = "") -> Position:
@@ -380,8 +386,8 @@ class DerivBroker(Broker):
         quote = await self.quote(symbol)
         entry = quote.ask if side is Side.BUY else quote.bid
         limit_order: Dict[str, float] = {}
-        sl_amt = self._amount(stake, entry, stop_loss)
-        tp_amt = self._amount(stake, entry, take_profit)
+        sl_amt = self._amount(symbol, stake, entry, stop_loss)
+        tp_amt = self._amount(symbol, stake, entry, take_profit)
         if sl_amt > 0:
             # Deriv rejects a stop-loss larger than the stake (minus commission).
             limit_order["stop_loss"] = max(0.01, min(sl_amt, round(stake * 0.95, 2)))
@@ -390,14 +396,14 @@ class DerivBroker(Broker):
         params = {
             "amount": stake, "basis": "stake", "currency": self._currency,
             "contract_type": "MULTUP" if side is Side.BUY else "MULTDOWN",
-            "symbol": symbol, "multiplier": self.multiplier,
+            "symbol": symbol, "multiplier": self.mult(symbol),
         }
         if limit_order:
             params["limit_order"] = limit_order
         resp = await self._call({"buy": 1, "price": stake, "parameters": params})
         cid = str(resp["buy"]["contract_id"])
         log.info("Deriv bought %s %s stake=%.2f x%d contract=%s sl=%s tp=%s", params["contract_type"], symbol,
-                 stake, self.multiplier, cid, limit_order.get("stop_loss"), limit_order.get("take_profit"))
+                 stake, self.mult(symbol), cid, limit_order.get("stop_loss"), limit_order.get("take_profit"))
         poc = await self._track(cid)
         pos = self._to_position(poc)
         if pos.entry_price <= 0:
@@ -411,8 +417,8 @@ class DerivBroker(Broker):
 
     async def modify_position(self, pos: Position, stop_loss: float, take_profit: float) -> Position:
         limit_order: Dict[str, Any] = {}
-        sl_amt = self._amount(pos.volume, pos.entry_price, stop_loss)
-        tp_amt = self._amount(pos.volume, pos.entry_price, take_profit)
+        sl_amt = self._amount(pos.symbol, pos.volume, pos.entry_price, stop_loss)
+        tp_amt = self._amount(pos.symbol, pos.volume, pos.entry_price, take_profit)
         # Deriv's stop_loss is a *loss* amount, so a stop that already sits in profit (breakeven /
         # trailing) cannot be held by the server. We send the smallest legal stop (≈ breakeven) as a
         # hard floor and track the real level as a virtual stop that sells the contract when hit.

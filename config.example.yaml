@@ -3,8 +3,20 @@
 # through environment variables (DERIV_TOKEN, MT5_LOGIN, MT5_PASSWORD, MT5_SERVER).
 # ---------------------------------------------------------------------------
 broker: paper            # paper | deriv | mt5   (paper = real prices, simulated fills)
-symbol: R_75             # Deriv: R_10 R_25 R_50 R_75 R_100 1HZ75V frxEURUSD ...
-                         # MT5 (HFM): EURUSD GBPUSD XAUUSD ...  MT5 (Deriv): "Volatility 75 Index"
+
+# Charts to trade. Each runs its own strategy loop; risk limits below apply to the whole portfolio.
+# A plain name uses the shared `strategy:` block; a mapping may override strategy/engine/backtest
+# settings, the Deriv `multiplier`, or the `timeframe_sec` for that chart only.
+symbols:
+  - R_75                 # Deriv: R_10 R_25 R_50 R_75 R_100 1HZ75V frxEURUSD ...
+  - R_100                # MT5 (HFM): EURUSD GBPUSD XAUUSD ...  MT5 (Deriv): "Volatility 75 Index"
+  - symbol: frxEURUSD
+    multiplier: 500      # Deriv forex pairs offer larger multipliers than synthetics
+    strategy:
+      trade_hours: "07:00-20:00"
+      trade_days: "mon,tue,wed,thu,fri"
+      max_spread_points: 20
+# symbol: R_75           # single-chart alternative to `symbols:`
 timeframe_sec: 60        # 60 = M1 scalping; MT5 supports 60,120,180,300,600,900,1800,3600
 poll_interval_sec: 1.0
 candle_count: 300
@@ -74,10 +86,11 @@ risk:
   risk_per_trade_pct: 0.5          # % of balance lost if the stop is hit
   fixed_volume: 0                  # > 0 forces a fixed lot size / stake
   max_risk_overshoot: 2.0
-  max_daily_loss_pct: 3.0
+  max_daily_loss_pct: 3.0          # portfolio-wide: trading stops on every chart once hit
   max_daily_profit_pct: 0          # 0 = no daily profit cap
   max_trades_per_day: 30
-  max_open_positions: 1
+  max_open_positions: 3            # across ALL charts at once (worst case = this x risk_per_trade_pct)
+  max_positions_per_symbol: 1
   max_consecutive_losses: 3
   cooldown_after_loss_sec: 120
   consecutive_loss_pause_sec: 1800

@@ -55,6 +55,8 @@ input int             InpMaxTradesPerDay    = 30;          // Max trades per day
 input int             InpMaxConsecLosses    = 3;           // Pause after N consecutive losses (0 = off)
 input int             InpCooldownSec        = 120;         // Cooldown after a loss (seconds)
 input int             InpConsecLossPauseSec = 1800;        // Pause length after consecutive losses
+input bool            InpPortfolioLimits    = true;        // Daily limits count every chart with this magic
+input int             InpMaxTotalPositions  = 3;           // Max open positions across all charts (0 = off)
 
 input group "=== Execution ==="
 input ulong           InpMagic              = 777123;      // Magic number
@@ -171,6 +173,11 @@ void OnTick()
    ManagePositions(newBar);
    if(!newBar) return;
    if(CountOurPositions() > 0) return;
+   if(InpMaxTotalPositions > 0 && CountAllOurPositions() >= InpMaxTotalPositions)
+   {
+      if(lastBlockReason != "max_total_positions") { Print("entries blocked: max_total_positions"); lastBlockReason = "max_total_positions"; }
+      return;
+   }
 
    string why;
    if(!RiskAllows(why))
@@ -198,6 +205,15 @@ int CountOurPositions()
    int n = 0;
    for(int i = PositionsTotal() - 1; i >= 0; i--)
       if(position.SelectByIndex(i) && position.Symbol() == _Symbol && (ulong)position.Magic() == InpMagic) n++;
+   return n;
+}
+
+//+------------------------------------------------------------------+
+int CountAllOurPositions()
+{
+   int n = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+      if(position.SelectByIndex(i) && (ulong)position.Magic() == InpMagic) n++;
    return n;
 }
 
@@ -452,7 +468,7 @@ void RecomputeDay()
    {
       ulong t = HistoryDealGetTicket(i);
       if(t == 0) continue;
-      if(HistoryDealGetString(t, DEAL_SYMBOL) != _Symbol) continue;
+      if(!InpPortfolioLimits && HistoryDealGetString(t, DEAL_SYMBOL) != _Symbol) continue;
       if((ulong)HistoryDealGetInteger(t, DEAL_MAGIC) != InpMagic) continue;
       long entry = HistoryDealGetInteger(t, DEAL_ENTRY);
       double p = HistoryDealGetDouble(t, DEAL_PROFIT) + HistoryDealGetDouble(t, DEAL_COMMISSION)

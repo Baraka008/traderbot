@@ -1,6 +1,6 @@
 # scalper-bot
 
-A scalping bot for **Deriv** and **HFM (HotForex)** with one strategy core and two execution paths:
+A multi-chart scalping bot for **Deriv** and **HFM (HotForex)** with one strategy core and two execution paths:
 
 | Platform | How it connects | Volume unit |
 |---|---|---|
@@ -30,6 +30,32 @@ and the Python engine against Deriv's API with identical behaviour.
   higher-timeframe trend confirmation (`htf_multiplier`, e.g. M5 EMA when scalping M1).
 
 Every parameter is in `config.example.yaml`. Step-by-step setup is in [INSTALL.md](INSTALL.md).
+
+## Trading several charts at once
+
+List the charts under `symbols:`; the bot runs one strategy loop per chart over a single broker connection
+and takes a position wherever a setup passes the filters:
+
+```yaml
+symbols:
+  - R_75
+  - R_100
+  - symbol: frxEURUSD          # per-chart overrides
+    multiplier: 500
+    strategy: {trade_hours: "07:00-20:00", trade_days: "mon,tue,wed,thu,fri"}
+risk:
+  max_open_positions: 3        # portfolio-wide cap on simultaneous positions
+  max_positions_per_symbol: 1
+  max_daily_loss_pct: 3.0      # portfolio-wide: one cap for the whole account
+```
+
+The risk manager is shared, so the daily loss cap, trade count, cooldowns and `max_open_positions` apply across
+all charts; `max_positions_per_symbol` limits each one. `scalper check` warns when
+`max_open_positions × risk_per_trade_pct` exceeds the daily cap. Every command (`fetch`, `backtest`, `optimize`,
+`analyze`, `check`) runs over the whole list, or one chart with `--symbol R_75`; `optimize --write` and
+`analyze --write` store tuned parameters as per-symbol overrides. For the MQL5 EA, attach it to each chart with
+the same magic number: `InpPortfolioLimits` makes the daily limits account-wide and `InpMaxTotalPositions` caps
+open positions across charts.
 
 ## Chart history, tracking and optimisation
 
@@ -154,8 +180,8 @@ scalper/
   brokers/paper.py  simulated fills on real data          cli.py        run / backtest / fetch / symbols
 mql5/ScalperEA.mq5  the same strategy as an MT5 Expert Advisor
 scalper/history.py  candle store + indicator snapshots        optimize.py   grid search with out-of-sample check
-scalper/analysis.py statistics pack + Claude review (analyze)
-tests/              42 tests: indicators, strategy, risk, backtest, engine+paper, history, optimizer, Deriv protocol
+scalper/analysis.py statistics pack + Claude review (analyze)  engine.MultiEngine  one loop per chart, shared risk
+tests/              47 tests: indicators, strategy, risk, backtest, engine+paper, history, optimizer, Deriv protocol
 ```
 
 ## Important

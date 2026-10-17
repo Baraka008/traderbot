@@ -1,6 +1,6 @@
 [project]
 name = "scalper-bot"
-version = "1.1.0"
+version = "1.2.0"
 description = "EMA/RSI/ATR scalping bot for Deriv (WebSocket API) and MetaTrader 5 (HFM, Deriv MT5)"
 requires-python = ">=3.9"
 dependencies = ["websockets>=12,<18", "PyYAML>=6"]

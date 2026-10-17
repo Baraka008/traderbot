@@ -4,8 +4,8 @@ from __future__ import annotations
 import dataclasses
 import os
 import re
-from dataclasses import fields
-from typing import Any, Dict, Type, TypeVar
+from dataclasses import dataclass, fields
+from typing import Any, Dict, List, Optional, Type, TypeVar
 
 import yaml
 
@@ -58,22 +58,82 @@ def bind(cls: Type[T], data: Dict[str, Any] | None, **overrides) -> T:
     return cls(**kwargs)
 
 
+@dataclass
+class SymbolConfig:
+    """One chart to trade: the symbol plus optional per-symbol overrides."""
+    symbol: str
+    strategy: StrategyConfig
+    engine: EngineConfig
+    backtest: BacktestConfig
+    multiplier: Optional[int] = None     # Deriv multiplier override
+    timeframe_sec: int = 60
+
+
 class Config:
     def __init__(self, raw: Dict[str, Any]):
         self.raw = _substitute(raw)
         r = self.raw
         self.broker = str(r.get("broker", "paper")).lower()
-        self.symbol = str(r.get("symbol", "R_75"))
         self.timeframe_sec = int(r.get("timeframe_sec", 60))
         self.log_level = str(r.get("log_level", "INFO"))
-        self.engine = bind(EngineConfig, {**r, **(r.get("engine") or {})}, symbol=self.symbol,
-                           timeframe_sec=self.timeframe_sec)
-        self.strategy = bind(StrategyConfig, r.get("strategy"), timeframe_sec=self.timeframe_sec)
         self.risk = bind(RiskConfig, r.get("risk"))
-        self.backtest = bind(BacktestConfig, r.get("backtest"))
         self.deriv: Dict[str, Any] = dict(r.get("deriv") or {})
         self.mt5: Dict[str, Any] = dict(r.get("mt5") or {})
         self.paper: Dict[str, Any] = dict(r.get("paper") or {})
+
+        # `symbols:` (list of names or mappings with overrides) wins over the single `symbol:`.
+        entries = r.get("symbols")
+        if not entries:
+            entries = [str(r.get("symbol", "R_75"))]
+        if isinstance(entries, (str, int)):
+            entries = [str(x).strip() for x in str(entries).split(",") if str(x).strip()]
+        self.symbols: List[SymbolConfig] = []
+        seen = set()
+        for entry in entries:
+            if isinstance(entry, dict):
+                name = str(entry.get("symbol") or entry.get("name") or "").strip()
+                if not name:
+                    raise ValueError("each `symbols` mapping needs a `symbol` key")
+                overrides = entry
+            else:
+                name = str(entry).strip()
+                overrides = {}
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            tf = int(overrides.get("timeframe_sec", self.timeframe_sec))
+            strategy = bind(StrategyConfig, {**(r.get("strategy") or {}), **(overrides.get("strategy") or {})},
+                            timeframe_sec=tf)
+            engine = bind(EngineConfig, {**r, **(r.get("engine") or {}), **(overrides.get("engine") or {})},
+                          symbol=name, timeframe_sec=tf)
+            backtest = bind(BacktestConfig, {**(r.get("backtest") or {}), **(overrides.get("backtest") or {})})
+            mult = overrides.get("multiplier")
+            self.symbols.append(SymbolConfig(symbol=name, strategy=strategy, engine=engine, backtest=backtest,
+                                             multiplier=int(mult) if mult is not None else None, timeframe_sec=tf))
+        if not self.symbols:
+            raise ValueError("no symbols configured")
+        if len(self.symbols) > 1 and self.risk.max_open_positions < 2:
+            # a portfolio cap of 1 would make the extra charts pointless; log-free sane default
+            self.risk.max_open_positions = len(self.symbols)
+
+        # Backwards-compatible single-symbol views (first entry).
+        first = self.symbols[0]
+        self.symbol = first.symbol
+        self.engine = first.engine
+        self.strategy = first.strategy
+        self.backtest = first.backtest
+
+    def select(self, symbol: Optional[str]) -> List[SymbolConfig]:
+        if not symbol:
+            return list(self.symbols)
+        hits = [s for s in self.symbols if s.symbol == symbol]
+        if not hits:
+            raise ValueError(f"symbol '{symbol}' is not in the config (have {[s.symbol for s in self.symbols]})")
+        return hits
+
+    @property
+    def deriv_multipliers(self) -> Dict[str, int]:
+        return {s.symbol: s.multiplier for s in self.symbols if s.multiplier is not None}
 
     @classmethod
     def load(cls, path: str) -> "Config":
