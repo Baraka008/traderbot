@@ -44,7 +44,7 @@ pip install -e ".[dev]"
 Verify:
 ```bash
 scalper --version
-pytest -q          # 37 tests should pass
+pytest -q          # 42 tests should pass
 ```
 
 ## 4. Configure
@@ -97,6 +97,16 @@ scalper backtest -c config.yaml                # uses the stored history automat
 scalper optimize -c config.yaml --write config.tuned.yaml   # grid search with out-of-sample check
 ```
 Only trade a parameter set that the optimiser marks **ROBUST** (profitable on bars it never saw).
+
+## 6b. Optional: Claude-assisted review
+
+```bash
+pip install -e ".[ai]"
+export ANTHROPIC_API_KEY=sk-ant-...        # Windows: $env:ANTHROPIC_API_KEY = "sk-ant-..."
+scalper analyze -c config.yaml --out review.md --write config.suggested.yaml
+```
+Claude reads the journal, history and backtest and writes a review with parameter suggestions. Backtest
+`config.suggested.yaml` before using it. Claude never trades.
 
 ## 7. Paper trade, then go live
 

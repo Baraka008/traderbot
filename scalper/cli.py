@@ -257,6 +257,54 @@ def cmd_optimize(args) -> int:
     return 0
 
 
+def cmd_analyze(args) -> int:
+    """Compile journal/history statistics and (optionally) have Claude review them."""
+    import yaml
+    from .analysis import analyze_with_claude, build_statistics_pack, pack_to_text
+    cfg = Config.load(args.config)
+    _setup_logging(args.log_level or "WARNING")
+    pack = build_statistics_pack(cfg.symbol, cfg.timeframe_sec, cfg.strategy, cfg.risk, cfg.backtest,
+                                 cfg.engine.journal_csv, cfg.engine.history_dir or "data")
+    if args.stats_only:
+        print(pack_to_text(pack))
+        return 0
+    if pack["journal"].get("trades", 0) == 0 and not pack.get("backtest_on_history"):
+        print("nothing to analyse yet: no trades in the journal and no stored history. Run `scalper fetch` "
+              "and/or paper trade first.", file=sys.stderr)
+        return 2
+    print(f"asking {args.model} to review {pack['journal'].get('trades', 0)} journal trades and "
+          f"{pack.get('history', {}).get('bars', 0)} stored bars for {cfg.symbol} ...\n", file=sys.stderr)
+    try:
+        report, suggestions, usage = analyze_with_claude(
+            pack, model=args.model, effort=args.effort, max_tokens=args.max_tokens,
+            on_text=(lambda t: print(t, end="", flush=True)) if not args.out else None)
+    except RuntimeError as e:
+        print(f"analysis failed: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:  # SDK errors (auth, rate limit, network)
+        print(f"Claude API error: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    if args.out:
+        with open(args.out, "w") as f:
+            f.write(report)
+        print(f"report written to {args.out}", file=sys.stderr)
+    else:
+        print()
+    print(f"\n[usage] model={usage.get('model')} input_tokens={usage.get('input_tokens')} "
+          f"output_tokens={usage.get('output_tokens')}", file=sys.stderr)
+    if suggestions and args.write:
+        merged = dict(cfg.raw)
+        merged["strategy"] = {**(merged.get("strategy") or {}), **(suggestions.get("suggested_strategy_changes") or {})}
+        merged["risk"] = {**(merged.get("risk") or {}), **(suggestions.get("suggested_risk_changes") or {})}
+        with open(args.write, "w") as f:
+            yaml.safe_dump(merged, f, sort_keys=False)
+        print(f"suggested config written to {args.write} - backtest it before use: "
+              f"scalper backtest -c {args.write}", file=sys.stderr)
+    elif args.write:
+        print("no machine-readable suggestions found in the report; nothing written", file=sys.stderr)
+    return 0
+
+
 def cmd_check(args) -> int:
     """Pre-flight: validate config, connect, and print everything that could go wrong before trading."""
     cfg = Config.load(args.config)
@@ -417,6 +465,17 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("--seed", type=int, default=42)
     o.add_argument("--log-level")
     o.set_defaults(fn=cmd_optimize)
+
+    a = sub.add_parser("analyze", help="have Claude review the trade journal, history and backtest")
+    a.add_argument("-c", "--config", required=True)
+    a.add_argument("--model", default="claude-opus-5-5")
+    a.add_argument("--effort", default="high", choices=["low", "medium", "high", "xhigh", "max"])
+    a.add_argument("--max-tokens", type=int, default=16000)
+    a.add_argument("--out", help="write the report to this markdown file instead of printing it")
+    a.add_argument("--write", help="write a config YAML with Claude's suggested parameters (backtest it first!)")
+    a.add_argument("--stats-only", action="store_true", help="print the statistics pack without calling Claude")
+    a.add_argument("--log-level")
+    a.set_defaults(fn=cmd_analyze)
 
     h = sub.add_parser("history", help="show stored chart history")
     h.add_argument("-c", "--config", required=True)

@@ -41,6 +41,26 @@ Every parameter is in `config.example.yaml`. Step-by-step setup is in [INSTALL.m
   `--write config.tuned.yaml` saves the best one.
 * `scalper check` is a pre-flight: config validation, connectivity, symbol specs, spread vs ATR, market open, position sizing.
 
+## Claude-assisted analysis (optional)
+
+`scalper analyze` compiles everything the bot has recorded (trade journal broken down by exit reason, side, hour
+and weekday; indicator snapshot distributions; stored-history quality; a fresh backtest) and asks Claude to review
+it: where the losses come from, what is working, which parameters to change and why, and whether the symbol is
+worth trading at all. Claude never places trades and is never in the tick-to-order path; it reads statistics after
+the fact.
+
+```bash
+pip install -e ".[ai]"                       # installs the anthropic SDK
+export ANTHROPIC_API_KEY=sk-ant-...          # https://platform.claude.com
+scalper analyze -c config.yaml               # streams the review to the terminal
+scalper analyze -c config.yaml --out review.md --write config.suggested.yaml
+scalper backtest -c config.suggested.yaml    # always verify suggestions before trading them
+scalper analyze -c config.yaml --stats-only  # just print the statistics pack, no API call
+```
+
+Default model is `claude-opus-5-5` with server-side refusal fallback enabled; `--model`, `--effort` and
+`--max-tokens` override. One review costs roughly a few cents of API usage; the token count is printed afterwards.
+
 ## Reliability
 
 * Candle data is validated on every bar (duplicates, malformed bars, gaps are logged); a frozen price feed is detected
@@ -134,7 +154,8 @@ scalper/
   brokers/paper.py  simulated fills on real data          cli.py        run / backtest / fetch / symbols
 mql5/ScalperEA.mq5  the same strategy as an MT5 Expert Advisor
 scalper/history.py  candle store + indicator snapshots        optimize.py   grid search with out-of-sample check
-tests/              37 tests: indicators, strategy, risk, backtest, engine+paper, history, optimizer, Deriv protocol
+scalper/analysis.py statistics pack + Claude review (analyze)
+tests/              42 tests: indicators, strategy, risk, backtest, engine+paper, history, optimizer, Deriv protocol
 ```
 
 ## Important
